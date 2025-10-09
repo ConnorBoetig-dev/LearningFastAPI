@@ -15,3 +15,9 @@ boto3==1.35.22
 python-multipart==0.0.9
 python-dotenv==1.0.1
 
+# -------------------------
+# Testing tools (for running pytest locally)
+# -------------------------
+pytest==8.3.3
+pytest-asyncio==0.24.0
+
