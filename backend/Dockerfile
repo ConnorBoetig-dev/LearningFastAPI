@@ -22,11 +22,11 @@ WORKDIR /app
 # Docker caches each step (layer). If requirements.txt doesn't change,
 # Docker reuses the cached layer instead of re-downloading packages.
 # This makes rebuilds MUCH faster during development.
-COPY requirements.txt /app/
+COPY backend/requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy your application code into the image
-# This copies backend/app → /app/app inside the container
+# This copies app/ from project root → /app/app inside the container
 # CONNECTION: This is your Python code from app/main.py
 COPY app /app/app
 
