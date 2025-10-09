@@ -1,0 +1,28 @@
+# =============================================================================================
+# REQUIREMENTS.TXT - PYTHON DEPENDENCIES
+# =============================================================================================
+# This file lists all Python packages your app needs.
+# CONNECTION: backend/Dockerfile runs "pip install -r requirements.txt" to install these
+# WHY: Keeps dependencies explicit and reproducible across environments
+# =============================================================================================
+
+# -------------------------
+# FastAPI stack - The web framework
+# -------------------------
+fastapi               # The web framework itself - handles routing, validation, JSON responses
+uvicorn[standard]     # ASGI web server that actually runs FastAPI apps
+                      # [standard] includes extra performance features
+
+# -------------------------
+# Storage SDKs - For talking to MinIO
+# -------------------------
+boto3                 # AWS SDK for Python - also works with MinIO (S3-compatible API)
+                      # This is how your Python code will upload/download files to MinIO
+python-multipart      # Enables FastAPI to parse file uploads from HTML forms
+                      # Without this, file uploads won't work
+
+# -------------------------
+# Utilities
+# -------------------------
+python-dotenv         # Reads .env files and loads them as environment variables
+                      # Optional here since docker-compose handles .env injection

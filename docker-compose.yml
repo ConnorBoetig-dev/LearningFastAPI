@@ -1,0 +1,74 @@
+# =============================================================================================
+# DOCKER-COMPOSE.YML - THE ORCHESTRATOR
+# =============================================================================================
+# This is the main file that ties everything together. It defines:
+# 1. What containers to run (services)
+# 2. How they communicate (networking - automatic private network)
+# 3. What ports to expose to your host machine
+# 4. What environment variables to inject
+#
+# CONNECTION FLOW:
+# - Reads .env for environment variables
+# - Uses backend/Dockerfile to build the "api" service
+# - Pulls MinIO image from the internet for the "minio" service
+# - Creates a private network so "api" can talk to "minio" using service names
+# =============================================================================================
+
+services:
+  # -------------------------
+  # SERVICE 1: Storage server (S3-compatible)
+  # -------------------------
+  # MinIO is like a mini AWS S3 that runs locally. It stores files (blobs).
+  # Your FastAPI app will eventually talk to this to upload/download files.
+  minio:
+    image: quay.io/minio/minio:latest     # Pre-built image from the internet (no Dockerfile needed)
+    container_name: minio                 # Friendly name you'll see in `docker ps`
+    ports:
+      # PORT MAPPING: host:container
+      # "9000:9000" means: localhost:9000 (your machine) → port 9000 (inside container)
+      - "9000:9000"   # S3 API endpoint - app code uses this to upload/download files
+      - "9001:9001"   # Web UI - open http://localhost:9001 in browser to see MinIO console
+    environment:
+      # Inject variables from .env file - these become environment variables inside the container
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    # Override the default startup command
+    command: server /data --console-address ":9001"
+    volumes:
+      # VOLUMES: Persist data even when container is deleted
+      # "minio-data:/data" means: Docker manages a folder, mounts it at /data inside container
+      - minio-data:/data
+
+  # -------------------------
+  # SERVICE 2: Your FastAPI application
+  # -------------------------
+  # This is your Python web API that will handle HTTP requests and talk to MinIO.
+  api:
+    build:
+      context: ./backend              # Look for a Dockerfile in ./backend to build this image
+                                      # CONNECTION: This triggers backend/Dockerfile
+    container_name: fastapi           # Friendly name for this container
+    env_file: .env                    # Inject ALL variables from .env into this container
+                                      # Your Python app will read these with os.getenv()
+    ports:
+      - "8000:8000"                   # Visit http://localhost:8000 to hit your API
+    depends_on:
+      - minio                         # Start MinIO first, then start this container
+                                      # WHY: Your app needs MinIO to be ready
+    volumes:
+      # DEVELOPMENT TRICK: Mount your source code from host → container
+      # "./backend/app:/app/app" means: changes to backend/app sync instantly into /app/app in container
+      # With --reload flag, uvicorn detects changes and restarts automatically
+      - ./backend/app:/app/app
+    # Override the CMD from the Dockerfile - this is what actually runs your app
+    # uvicorn is the web server, app.main:app means "import app from app/main.py"
+    # --reload watches for file changes (don't use in production!)
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# -------------------------
+# VOLUMES: Persistent storage managed by Docker
+# -------------------------
+# Named volumes live on your host machine and survive container deletion.
+# You can see them with `docker volume ls`
+volumes:
+  minio-data:
