@@ -51,7 +51,6 @@ jobs:
 
       - name: Install strip-comments for web assets
         run: |
-          cd clean
           npm init -y >/dev/null 2>&1
           npm i strip-comments -D >/dev/null 2>&1
 
@@ -251,7 +250,11 @@ jobs:
 
       - name: Replace destination tree with clean output and push
         run: |
-          rsync -a --delete clean/ dest/
+          rsync -a --delete \
+            --exclude "node_modules" \
+            --exclude "package.json" \
+            --exclude "package-lock.json" \
+            clean/ dest/
           cd dest
           if [ -n "$(git status --porcelain)" ]; then
             git add -A
