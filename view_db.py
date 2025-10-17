@@ -166,3 +166,4 @@ if __name__ == '__main__':
 
     server = HTTPServer(('localhost', 8001), DBViewerHandler)
     server.serve_forever()
+
