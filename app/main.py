@@ -1,189 +1,333 @@
 # =============================================================================================
-# APP/MAIN.PY - YOUR FASTAPI APPLICATION WITH MINIO INTEGRATION
+# APP/MAIN.PY - FASTAPI APPLICATION WITH AUTHENTICATION + MINIO
 # =============================================================================================
-# This is the entry point for your web API. It defines:
-# - Routes (URL endpoints like "/" and "/upload")
-# - File upload handling with MinIO (S3-compatible object storage)
-# - Environment-based configuration (reads from .env via docker-compose)
+# This is the entry point for your web API. It provides:
+# - Authentication (register, login, JWT tokens)
+# - File upload with MinIO (S3-compatible object storage)
+# - Protected routes (require authentication)
 #
-# CONNECTION FLOW:
-# 1. docker-compose.yml runs: uvicorn app.main:app
-# 2. uvicorn imports this file and looks for the "app" object
-# 3. FastAPI handles incoming HTTP requests and calls your functions
-# 4. boto3 library communicates with MinIO using the S3 API
-# 5. Files are stored in MinIO and presigned URLs are returned for access
+# ARCHITECTURE:
+# - Postgres: User accounts and refresh tokens
+# - MinIO: File storage (uploaded files)
+# - FastAPI: REST API server
+# - JWT: Stateless authentication
+#
+# FLOW:
+# 1. User registers or logs in → gets JWT tokens
+# 2. User uploads file with access token → file stored in MinIO
+# 3. Access token expires (15 min) → user refreshes with refresh token
+# 4. User logs out → refresh token revoked in database
 # =============================================================================================
 
-# -------------------------
-# Imports - What each library does
-# -------------------------
-import os          # Read environment variables (STORAGE_ENDPOINT, etc.)
-import time        # Generate timestamps for unique filenames
+import os
+import time
 
-from fastapi import FastAPI, File, UploadFile, HTTPException  # Web framework
-from fastapi.responses import HTMLResponse                     # Serve HTML pages
-from pydantic import BaseModel                                 # Define response schemas
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from botocore.config import Config           # Configure S3 client settings
-import boto3                                  # AWS SDK (works with MinIO too!)
-from botocore.exceptions import ClientError  # Handle S3/MinIO errors gracefully
+from botocore.config import Config
+import boto3
+from botocore.exceptions import ClientError
 
 # -------------------------
-# Create the FastAPI application
+# Import authentication components
 # -------------------------
-# This "app" object is what uvicorn looks for (see docker-compose.yml command)
-app = FastAPI()
+from app.core.db import init_db
+from app.core.deps import get_current_user
+from app.models.user import User
+from app.routers import auth
 
 # -------------------------
-# ROUTE 1: Home page with upload form
+# Create FastAPI application
 # -------------------------
-# @app.get("/") means: when someone visits http://localhost:8000/, run this function
-# response_class=HTMLResponse tells FastAPI to return HTML instead of JSON
-@app.get("/", response_class=HTMLResponse)
-def read_root():
+app = FastAPI(
+    title="File Upload API with Authentication",
+    description="Secure file upload service with JWT authentication and MinIO storage",
+    version="2.0.0",
+)
+
+# -------------------------
+# Database initialization on startup
+# -------------------------
+@app.on_event("startup")
+def on_startup():
     """
-    Returns a simple HTML page with a file upload form.
-    The form POSTs to /upload endpoint when user clicks "Upload" button.
+    Initialize database tables on application startup.
+
+    WHAT THIS DOES:
+    - Creates users table if it doesn't exist
+    - Creates refresh_tokens table if it doesn't exist
+    - Uses SQLAlchemy's Base.metadata.create_all()
+
+    WHY ON STARTUP?
+    - Ensures database schema is ready before first request
+    - Idempotent: safe to run multiple times (CREATE IF NOT EXISTS)
+    - Simple for development/learning (production should use Alembic migrations)
+
+    PRODUCTION NOTE:
+    - For production, use Alembic for migrations instead
+    - Alembic tracks schema changes, supports rollbacks, data migrations
+    - Command: `alembic upgrade head` (run in deployment script)
+
+    DATABASE CREATION SQL (what this generates):
+        CREATE TABLE IF NOT EXISTS users (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            email VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(60) NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS refresh_tokens (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+            token_hash VARCHAR(64) UNIQUE NOT NULL,
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            revoked BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL
+        );
     """
-    return """
-    <!DOCTYPE html><html><body>
-      <h1>mini.io</h1>
-      <p>Simple file upload service</p>
-      <form action="/upload" method="post" enctype="multipart/form-data">
-        <input type="file" name="file" required><button type="submit">Upload</button>
-      </form>
-    </body></html>
-    """
+    init_db()
+
 
 # -------------------------
-# Response Model - Defines the JSON structure returned by /upload
+# Include authentication router
 # -------------------------
-# Pydantic models provide:
-# - Type validation (ensures responses match this structure)
-# - Auto-generated API documentation in /docs
-# - Clear contract for frontend developers
+# This adds all auth endpoints under /auth prefix:
+# - POST /auth/register
+# - POST /auth/login
+# - POST /auth/refresh
+# - POST /auth/logout
+# - GET /auth/me
+app.include_router(auth.router)
+
+
+# =============================================================================================
+# FILE UPLOAD ENDPOINT (must be defined before static files mount)
+# =============================================================================================
+
+
+# =============================================================================================
+# PUBLIC ROUTES (no authentication required)
+# =============================================================================================
+
+# =============================================================================================
+# PROTECTED ROUTES (authentication required)
+# =============================================================================================
+# Note: Frontend is now served via StaticFiles mount at the end of this file
+
+# -------------------------
+# Upload response schema
+# -------------------------
 class UploadResponse(BaseModel):
-    filename: str       # Original name of uploaded file
-    key: str            # Object key in MinIO (includes timestamp)
-    url: str | None     # Presigned URL for downloading (expires in 1 hour)
-    status: str         # Upload status message
+    filename: str
+    key: str
+    url: str | None
+    status: str
+
 
 # -------------------------
-# ROUTE 2: Handle file uploads to MinIO
+# Protected file upload endpoint
 # -------------------------
-# @app.post("/upload") means: when someone POSTs to /upload, run this function
-# response_model=UploadResponse ensures the response matches our schema above
 @app.post("/upload", response_model=UploadResponse)
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),  # 🔒 AUTHENTICATION REQUIRED
+):
     """
-    Receives a file upload, stores it in MinIO, and returns a download URL.
+    Upload file to MinIO storage (PROTECTED - requires authentication).
+
+    AUTHENTICATION:
+    - Requires valid access token in Authorization header
+    - Format: `Authorization: Bearer <access_token>`
+    - get_current_user dependency validates token and loads user
+    - If token is invalid/missing/expired → 401 Unauthorized
 
     FLOW:
-    1. Read configuration from environment variables
-    2. Validate credentials exist
-    3. Connect to MinIO using boto3 S3 client
-    4. Ensure the bucket exists (create if needed)
-    5. Upload file with timestamped filename
-    6. Generate a presigned URL for downloading
-    7. Return JSON response with file details
+    1. Validate access token (get_current_user dependency)
+    2. Accept file upload from authenticated user
+    3. Store file in MinIO with timestamped filename
+    4. Generate presigned download URL (1 hour expiry)
+    5. Return file metadata + download URL
+
+    SECURITY NOTES:
+    - Only authenticated users can upload files
+    - Each file is associated with the user who uploaded it (via current_user)
+    - TODO: Store file metadata in database (link file to user)
+    - TODO: Add file size limits (prevent abuse)
+    - TODO: Add file type validation (block executables, etc.)
+    - TODO: Scan files for malware before storing
+
+    REQUEST:
+        POST /upload
+        Authorization: Bearer eyJhbGci...
+        Content-Type: multipart/form-data
+
+        file=<binary data>
+
+    RESPONSE (200 OK):
+        {
+            "filename": "document.pdf",
+            "key": "1704067200-document.pdf",
+            "url": "http://minio:9000/uploads/1704067200-document.pdf?...",
+            "status": "uploaded"
+        }
+
+    ERRORS:
+        401 Unauthorized: Missing or invalid access token
+        500 Internal Server Error: MinIO upload failed
     """
 
-    # -------------------------
-    # STEP 1: Load configuration from environment
-    # -------------------------
-    # These come from .env file → docker-compose.yml → container environment
-    # Uses os.getenv(key, default) to provide fallback values
-    endpoint = os.getenv("STORAGE_ENDPOINT", "http://minio:9000")  # MinIO server address
-    access_key = os.getenv("STORAGE_ACCESS_KEY")                   # MinIO username (like AWS access key)
-    secret_key = os.getenv("STORAGE_SECRET_KEY")                   # MinIO password (like AWS secret key)
-    bucket = os.getenv("STORAGE_BUCKET", "uploads")                # Bucket name (like a folder)
-    region = os.getenv("STORAGE_REGION", "us-east-1")              # Required by S3 API (MinIO ignores this)
+    # NOTE: If we reach this point, current_user is valid (authenticated)
+    # get_current_user dependency raises 401 if token is invalid
 
     # -------------------------
-    # STEP 2: Validate credentials are configured
+    # FUTURE ENHANCEMENT: Link file to user
     # -------------------------
-    # If .env is missing or incomplete, fail early with a clear error
+    # You could store file metadata in database:
+    #   file_record = UploadedFile(
+    #       user_id=current_user.id,
+    #       filename=file.filename,
+    #       minio_key=object_key,
+    #       size=file.file.size,
+    #       content_type=file.content_type,
+    #   )
+    #   db.add(file_record)
+    #   db.commit()
+
+    # -------------------------
+    # STEP 1: Load MinIO configuration
+    # -------------------------
+    endpoint = os.getenv("STORAGE_ENDPOINT", "http://minio:9000")
+    access_key = os.getenv("STORAGE_ACCESS_KEY")
+    secret_key = os.getenv("STORAGE_SECRET_KEY")
+    bucket = os.getenv("STORAGE_BUCKET", "uploads")
+    region = os.getenv("STORAGE_REGION", "us-east-1")
+
     if not access_key or not secret_key:
         raise HTTPException(status_code=500, detail="S3 credentials not configured")
 
     # -------------------------
-    # STEP 3: Create S3 client configured for MinIO
+    # STEP 2: Create S3 client
     # -------------------------
-    # boto3 is Amazon's SDK, but it works with any S3-compatible service (like MinIO!)
-    # endpoint_url tells boto3 to use MinIO instead of AWS
-    # signature_version="s3v4" is required for presigned URLs
     s3 = boto3.client(
         "s3",
-        endpoint_url=endpoint,                  # Point to MinIO instead of AWS
-        aws_access_key_id=access_key,           # MinIO username
-        aws_secret_access_key=secret_key,       # MinIO password
-        region_name=region,                     # Required by S3 protocol
-        config=Config(signature_version="s3v4"), # Use v4 signatures for presigned URLs
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=region,
+        config=Config(signature_version="s3v4"),
     )
 
     # -------------------------
-    # STEP 4: Ensure bucket exists (create if missing)
+    # STEP 3: Ensure bucket exists
     # -------------------------
-    # Buckets are like top-level folders in S3/MinIO
-    # head_bucket checks if bucket exists (throws ClientError if not)
     try:
-        s3.head_bucket(Bucket=bucket)  # Check if bucket exists
+        s3.head_bucket(Bucket=bucket)
     except ClientError:
-        # Bucket doesn't exist, try to create it
         try:
             s3.create_bucket(Bucket=bucket)
         except ClientError as e:
-            # Creation failed (permissions issue, network error, etc.)
             raise HTTPException(status_code=500, detail=f"Could not create/access bucket: {str(e)}")
 
     # -------------------------
-    # STEP 5: Build unique object key (filename in MinIO)
+    # STEP 4: Build unique object key
     # -------------------------
-    # Prefix with Unix timestamp to avoid filename collisions
-    # Example: 1704067200-myfile.pdf
+    # Include user ID in filename for organization:
+    # Format: {timestamp}-{user_id}-{filename}
+    # Example: 1704067200-123e4567-document.pdf
     timestamp = int(time.time())
-    object_key = f"{timestamp}-{file.filename}"
+    object_key = f"{timestamp}-{current_user.id}-{file.filename}"
 
     # -------------------------
-    # STEP 6: Upload file stream to MinIO
+    # STEP 5: Upload file to MinIO
     # -------------------------
-    # upload_fileobj streams the file (memory-efficient for large uploads)
-    # file.file is the actual file-like object from the HTTP request
     try:
         s3.upload_fileobj(file.file, bucket, object_key)
     except ClientError as e:
-        # Upload failed (network issue, disk full, permissions, etc.)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
     finally:
-        # Always close the file handle to free resources
         try:
             file.file.close()
         except Exception:
-            pass  # Ignore close errors (file might already be closed)
+            pass
 
     # -------------------------
-    # STEP 7: Generate presigned URL for downloading
+    # STEP 6: Generate presigned download URL
     # -------------------------
-    # Presigned URLs allow temporary access without credentials
-    # Valid for 3600 seconds (1 hour) - after that, link expires
     try:
         presigned = s3.generate_presigned_url(
-            "get_object",                                    # Operation type (download)
-            Params={"Bucket": bucket, "Key": object_key},    # Which file to download
-            ExpiresIn=3600,                                  # URL valid for 1 hour
+            "get_object",
+            Params={"Bucket": bucket, "Key": object_key},
+            ExpiresIn=3600,  # 1 hour
         )
     except ClientError:
-        # If presigned URL generation fails, just return None
-        # File is still uploaded successfully, just no download link
         presigned = None
 
     # -------------------------
-    # STEP 8: Return success response
+    # STEP 7: Return response
     # -------------------------
-    # FastAPI automatically serializes this to JSON based on UploadResponse model
     return UploadResponse(
-        filename=file.filename,  # Original filename
-        key=object_key,          # Timestamped key in MinIO
-        url=presigned,           # Download URL (or None)
-        status="uploaded"        # Success message
+        filename=file.filename,
+        key=object_key,
+        url=presigned,
+        status="uploaded"
     )
+
+
+# =============================================================================================
+# STATIC FILES (serve frontend) - MUST BE LAST
+# =============================================================================================
+# Mount static files for frontend
+# This serves index.html, app.js, style.css from frontend/ directory
+#
+# IMPORTANT: This must come AFTER all API routes to avoid conflicts
+# Order matters in FastAPI - routes are matched top-to-bottom
+# If this were first, it would catch all requests before API routes
+#
+# MOUNTING DETAILS:
+# - directory="frontend" → serve files from frontend/ folder
+# - html=True → serve index.html for directory requests (/, /login, etc.)
+# - name="frontend" → internal name for FastAPI
+#
+# ACCESSIBLE URLS:
+# - http://localhost:8000/ → serves frontend/index.html
+# - http://localhost:8000/app.js → serves frontend/app.js
+# - http://localhost:8000/style.css → serves frontend/style.css
+#
+# API ROUTES STILL WORK:
+# - /auth/register, /auth/login, /upload, etc. still accessible
+# - They're matched before the static mount reaches them
+try:
+    app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
+    print("✅ Frontend static files mounted successfully")
+except Exception as e:
+    print(f"⚠️  Failed to mount frontend: {e}")
+    print("   Frontend files may not be available. API routes will still work.")
+
+
+# =============================================================================================
+# EXAMPLE: Additional protected endpoints you might add
+# =============================================================================================
+
+# @app.get("/my-files")
+# async def list_my_files(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+#     """List all files uploaded by the authenticated user."""
+#     files = db.query(UploadedFile).filter(UploadedFile.user_id == current_user.id).all()
+#     return files
+#
+# @app.delete("/files/{file_id}")
+# async def delete_file(file_id: UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+#     """Delete a file (only if owned by current user)."""
+#     file = db.query(UploadedFile).filter(
+#         UploadedFile.id == file_id,
+#         UploadedFile.user_id == current_user.id
+#     ).first()
+#     if not file:
+#         raise HTTPException(404, "File not found or access denied")
+#     # Delete from MinIO and database
+#     s3.delete_object(Bucket=bucket, Key=file.minio_key)
+#     db.delete(file)
+#     db.commit()
+#     return {"message": "File deleted"}

@@ -1,11 +1,12 @@
 # =============================================================================================
-# DOCKER-COMPOSE.YML — THE ORCHESTRATOR (starts both containers + wiring)
+# DOCKER-COMPOSE.YML — THE ORCHESTRATOR (starts containers + wiring)
 # =============================================================================================
 # What this file does:
-# 1) Defines the services (containers) to run: MinIO (storage) + API (FastAPI app)
+# 1) Defines services: MinIO (file storage), API (FastAPI app)
 # 2) Sets up a private network so services can talk by name (e.g., http://minio:9000)
 # 3) Maps container ports to your host so your browser can reach them
 # 4) Feeds environment variables from .env into the containers
+# 5) Mounts project directory for SQLite database persistence
 # =============================================================================================
 
 services:
@@ -45,11 +46,14 @@ services:
     ports:
       - "8000:8000"  # host:container — browse to http://localhost:8000
     depends_on:
-      - minio        # Start MinIO first (the API will need it soon)
+      - minio  # Wait for MinIO to start before starting the API
     volumes:
       # DEV HOT-RELOAD: show the container your live source code.
       # host ./app  -> container /app/app   (matches paths used in the Dockerfile/uvicorn)
       - ./app:/app/app
+      # SQLITE PERSISTENCE: Mount project root so dev.db persists on host
+      # This allows the database to survive container restarts
+      - ./:/app
     # Run the ASGI server. "app.main:app" == import app from app/main.py
     # --reload auto-restarts on file changes (dev only).
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -58,4 +62,5 @@ services:
 # VOLUMES (persistent data managed by Docker)
 # -------------------------
 volumes:
-  minio-data:
+  minio-data:     # Uploaded files (S3 objects)
+  # Note: SQLite database (dev.db) persists on host filesystem via bind mount

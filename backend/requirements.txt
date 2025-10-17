@@ -9,15 +9,37 @@
 # -------------------------
 # FastAPI stack - The web framework
 # -------------------------
-fastapi==0.115.0
-uvicorn[standard]==0.30.3
-boto3==1.35.22
-python-multipart==0.0.9
-python-dotenv==1.0.1
+fastapi==0.115.0                 # Web framework (routes, dependency injection, validation)
+uvicorn[standard]==0.30.3        # ASGI server (runs FastAPI)
+python-multipart==0.0.9          # File upload support for FastAPI
+pydantic==2.9.2                  # Data validation (comes with FastAPI, but explicit for clarity)
+pydantic-settings==2.6.1         # Environment variable loading with type validation
+email-validator==2.2.0           # Email format validation for Pydantic EmailStr
 
 # -------------------------
-# Testing tools (for running pytest locally)
+# Database (Postgres + SQLAlchemy ORM)
 # -------------------------
-pytest==8.3.3
-pytest-asyncio==0.24.0
+sqlalchemy==2.0.35               # ORM for database operations (models, queries)
+psycopg2-binary==2.9.9           # Postgres driver for Python (required by SQLAlchemy)
+
+# -------------------------
+# Authentication & Security
+# -------------------------
+bcrypt==4.0.1                    # Bcrypt hashing (pinned for passlib compatibility)
+passlib==1.7.4                   # Password hashing wrapper
+pyjwt==2.9.0                     # JWT token creation and verification
+python-jose[cryptography]==3.3.0 # Alternative JWT library (optional, we use pyjwt)
+
+# -------------------------
+# File Storage (MinIO/S3)
+# -------------------------
+boto3==1.35.22                   # AWS SDK (works with MinIO S3-compatible API)
+python-dotenv==1.0.1             # Load .env files (for local development outside Docker)
+
+# -------------------------
+# Testing tools
+# -------------------------
+pytest==8.3.3                    # Test framework
+pytest-asyncio==0.24.0           # Async test support for FastAPI
+httpx==0.27.2                    # HTTP client for testing FastAPI endpoints
 
