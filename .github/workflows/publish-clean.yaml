@@ -266,6 +266,7 @@ jobs:
       - name: Replace destination tree with clean output and push
         run: |
           rsync -a --delete \
+            --exclude ".git" \
             --exclude "node_modules" \
             --exclude "package.json" \
             --exclude "package-lock.json" \
