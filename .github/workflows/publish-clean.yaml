@@ -177,23 +177,35 @@ jobs:
 
           def strip_web_files(paths):
               if not paths: return
-              files_arg = json.dumps([str(p) for p in paths])
-              js = r"""
-              const fs = require('fs');
-              const strip = require('strip-comments');
-              const files = JSON.parse(process.argv[2]);
-              for (const f of files) {
-                try {
-                  const src = fs.readFileSync(f, 'utf8');
-                  let out;
-                  if (f.endsWith('.css')) out = strip.css(src);
-                  else if (f.endsWith('.html') || f.endsWith('.htm')) out = strip.html(src);
-                  else out = strip(src);
-                  fs.writeFileSync(f, out.endsWith('\n') ? out : out + '\n', 'utf8');
-                } catch {}
-              }
-              """
-              subprocess.run(["node", "-e", js, files_arg], check=True)
+
+              # Write file list to JSON file
+              files_json = ROOT / "files_to_strip.json"
+              files_json.write_text(json.dumps([str(p) for p in paths]), encoding="utf-8")
+
+              # Write Node.js script to file
+              js_file = ROOT / "strip_comments_runner.js"
+              js_code = """const fs = require('fs');
+const strip = require('strip-comments');
+const files = JSON.parse(fs.readFileSync('clean/files_to_strip.json', 'utf8'));
+for (const f of files) {
+  try {
+    const src = fs.readFileSync(f, 'utf8');
+    let out;
+    if (f.endsWith('.css')) out = strip.css(src);
+    else if (f.endsWith('.html') || f.endsWith('.htm')) out = strip.html(src);
+    else out = strip(src);
+    fs.writeFileSync(f, out.endsWith('\\n') ? out : out + '\\n', 'utf8');
+  } catch {}
+}
+"""
+              js_file.write_text(js_code, encoding="utf-8")
+
+              # Run the script
+              subprocess.run(["node", str(js_file)], check=True, cwd=str(ROOT.parent))
+
+              # Clean up temp files
+              js_file.unlink()
+              files_json.unlink()
 
           web_exts = {".js",".jsx",".ts",".tsx",".css",".html",".htm"}
           py_exts  = {".py"}
